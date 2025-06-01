@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_service_description"
+    android:accessibilityEventTypes="typeViewClicked|typeViewFocused"
+    android:accessibilityFlags="flagDefault|flagRequestFilterKeyEvents|flagReportViewIds"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="100"
+    android:canRetrieveWindowContent="false"
+    android:canRequestFilterKeyEvents="true" />
+    <!--
+        android:description: Texto que aparecerá para o usuário na tela de ativação.
+        android:accessibilityEventTypes: Tipos de eventos de UI (não precisamos de muitos ).
+        android:accessibilityFlags: Crucial -> flagRequestFilterKeyEvents para pedir teclas.
+        android:canRequestFilterKeyEvents="true": Confirma que queremos eventos de tecla.
+        android:canRetrieveWindowContent="false": Importante! Diz que NÃO queremos ler o conteúdo da tela (melhora privacidade e confiança).
+    -->

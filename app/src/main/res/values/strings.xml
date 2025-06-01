@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">VolumeSOSApp</string>
+    <string name="accessibility_service_description">Permite que o app detecte pressionamentos do botão de volume para acionar o SOS. O app NÃO lê o conteúdo da tela.</string>
+
+</resources>
