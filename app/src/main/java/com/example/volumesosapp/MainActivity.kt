@@ -36,12 +36,8 @@ import android.content.Context
 import android.telephony.SmsManager
 import android.view.KeyEvent
 import android.content.Intent
-
-
-
-
-
-
+import kotlinx.coroutines.*
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : ComponentActivity() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
@@ -101,9 +97,6 @@ class MainActivity : ComponentActivity() {
         // Se alguma permissão estiver faltando, solicita
         if (permissionsToRequest.isNotEmpty()) {
             requestMultiplePermissionsLauncher.launch(permissionsToRequest.toTypedArray())
-        }
-        if (permissionsToRequest.isNotEmpty()) {
-            requestMultiplePermissionsLauncher.launch(permissionsToRequest.toTypedArray())
         } else {
             // Todas as permissões já estavam concedidas!
             Log.d(TAG, "Todas as permissões necessárias já concedidas. Iniciando serviço.")
@@ -111,37 +104,111 @@ class MainActivity : ComponentActivity() {
         }
     }
     // Função para obter a localização atual
-    @SuppressLint("MissingPermission") // As permissões são verificadas antes de chamar!
+    @SuppressLint("MissingPermission")
     private fun obterLocalizacaoAtual(callback: (Location?) -> Unit) {
-        // Verifica se temos permissão de localização (Fina OU Grossa)
         val hasFineLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val hasCoarseLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         if (!hasFineLocationPermission && !hasCoarseLocationPermission) {
             Log.w(TAG, "Permissão de localização não concedida ao tentar obter localização.")
             Toast.makeText(this, "Permissão de localização não concedida.", Toast.LENGTH_SHORT).show()
-            callback(null) // Retorna nulo pois não temos permissão
+            callback(null)
             return
         }
 
-        // Tenta obter a localização atual com alta precisão
-        Log.d(TAG, "Tentando obter localização atual...")
-        fusedLocationClient.getCurrentLocation(
-            Priority.PRIORITY_HIGH_ACCURACY, // Tenta obter a localização mais precisa
-            cancellationTokenSource.token // Permite cancelar a solicitação se necessário
-        ).addOnSuccessListener { location: Location? ->
-            if (location != null) {
-                Log.d(TAG, "Localização obtida: Lat=${location.latitude}, Lon=${location.longitude}")
-                callback(location) // Sucesso! Chama o callback com a localização
-            } else {
-                Log.w(TAG, "Falha ao obter localização (resultado nulo).")
-                Toast.makeText(this, "Não foi possível obter a localização.", Toast.LENGTH_SHORT).show()
-                callback(null) // Falha, chama o callback com nulo
+        Log.d(TAG, "Tentando obter localização atual (lastLocation)...")
+        fusedLocationClient.lastLocation
+            .addOnSuccessListener { location: Location? ->
+                if (location != null) {
+                    Log.d(TAG, "Localização obtida (lastLocation): Lat=${location.latitude}, Lon=${location.longitude}")
+                    callback(location)
+                } else {
+                    Log.w(TAG, "Falha ao obter localização (lastLocation nulo). Tentando getCurrentLocation...")
+                    fusedLocationClient.getCurrentLocation(
+                        Priority.PRIORITY_HIGH_ACCURACY,
+                        CancellationTokenSource().token
+                    ).addOnSuccessListener { loc: Location? ->
+                        if (loc != null) {
+                            Log.d(TAG, "Localização obtida (getCurrentLocation): Lat=${loc.latitude}, Lon=${loc.longitude}")
+                            callback(loc)
+                        } else {
+                            Log.w(TAG, "Falha ao obter localização (getCurrentLocation também nulo).")
+                            callback(null)
+                        }
+                    }.addOnFailureListener { exception ->
+                        Log.e(TAG, "Erro ao obter localização (getCurrentLocation)", exception)
+                        callback(null)
+                    }
+                }
             }
-        }.addOnFailureListener { exception ->
-            Log.e(TAG, "Erro ao obter localização", exception)
-            Toast.makeText(this, "Erro ao obter localização: ${exception.message}", Toast.LENGTH_LONG).show()
-            callback(null) // Erro, chama o callback com nulo
+            .addOnFailureListener { exception ->
+                Log.e(TAG, "Erro ao obter localização (lastLocation)", exception)
+                callback(null)
+            }
+    }
+
+    private val locationTimeoutMs = 7000L // 7 segundos de timeout para localização
+
+    @SuppressLint("MissingPermission")
+    private fun obterLocalizacaoAtualComTimeout(callback: (Location?) -> Unit) {
+        val hasFineLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarseLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasFineLocationPermission && !hasCoarseLocationPermission) {
+            Log.w(TAG, "Permissão de localização não concedida ao tentar obter localização.")
+            Toast.makeText(this, "Permissão de localização não concedida.", Toast.LENGTH_SHORT).show()
+            callback(null)
+            return
+        }
+
+        var callbackCalled = AtomicBoolean(false)
+        val mainScope = CoroutineScope(Dispatchers.Main)
+
+        Log.d(TAG, "Tentando obter localização atual (lastLocation)...")
+        fusedLocationClient.lastLocation
+            .addOnSuccessListener { location: Location? ->
+                if (!callbackCalled.getAndSet(true)) {
+                    if (location != null) {
+                        Log.d(TAG, "Localização obtida (lastLocation): Lat=${location.latitude}, Lon=${location.longitude}")
+                        callback(location)
+                    } else {
+                        Log.w(TAG, "Falha ao obter localização (lastLocation nulo). Tentando getCurrentLocation...")
+                        fusedLocationClient.getCurrentLocation(
+                            Priority.PRIORITY_HIGH_ACCURACY,
+                            CancellationTokenSource().token
+                        ).addOnSuccessListener { loc: Location? ->
+                            if (!callbackCalled.getAndSet(true)) {
+                                if (loc != null) {
+                                    Log.d(TAG, "Localização obtida (getCurrentLocation): Lat=${loc.latitude}, Lon=${loc.longitude}")
+                                    callback(loc)
+                                } else {
+                                    Log.w(TAG, "Falha ao obter localização (getCurrentLocation também nulo).")
+                                    callback(null)
+                                }
+                            }
+                        }.addOnFailureListener { exception ->
+                            if (!callbackCalled.getAndSet(true)) {
+                                Log.e(TAG, "Erro ao obter localização (getCurrentLocation)", exception)
+                                callback(null)
+                            }
+                        }
+                    }
+                }
+            }
+            .addOnFailureListener { exception ->
+                if (!callbackCalled.getAndSet(true)) {
+                    Log.e(TAG, "Erro ao obter localização (lastLocation)", exception)
+                    callback(null)
+                }
+            }
+
+        // Timeout manual para garantir que o callback sempre será chamado
+        mainScope.launch {
+            delay(locationTimeoutMs)
+            if (!callbackCalled.getAndSet(true)) {
+                Log.w(TAG, "Timeout ao tentar obter localização. Seguindo sem localização.")
+                callback(null)
+            }
         }
     }
 
@@ -175,49 +242,37 @@ class MainActivity : ComponentActivity() {
     // Função para enviar o SMS com (ou sem) a localização
     private fun enviarSmsComLocalizacao(context: Context, location: Location?) {
         val numeroDestino = "11934173173" // !!! SUBSTITUA PELO NÚMERO REAL !!!
-        val mensagemBase = "SOS! Preciso de ajuda."
-        val mensagemFinal: String
-
-        // Monta a mensagem final
-        if (location != null) {
+        val mensagemFinal = if (location != null) {
             val latitude = location.latitude
             val longitude = location.longitude
-            // Cria um link do Google Maps
-            val googleMapsLink = "https://www.google.com/maps/search/?api=1&query=$latitude,$longitude"
-            mensagemFinal = "$mensagemBase Minha localização aproximada: $googleMapsLink"
-            Log.d(TAG, "Preparando SMS com localização: $mensagemFinal" )
+            val googleMapsLink = "https://maps.google.com/?q=$latitude,$longitude"
+            "SOS! Preciso de ajuda.\nMinha localização:\n$googleMapsLink"
         } else {
-            mensagemFinal = "$mensagemBase (Localização não disponível)"
-            Log.d(TAG, "Preparando SMS sem localização: $mensagemFinal")
+            "SOS! Preciso de ajuda.\nLocalização não disponível."
         }
 
-        // Verifica a permissão de SMS ANTES de tentar enviar
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
             try {
-                // Obtém o gerenciador de SMS
+                Log.d(TAG, "Tentando enviar SMS para $numeroDestino")
                 val smsManager = context.getSystemService(SmsManager::class.java)
-                // Envia a mensagem
-                smsManager.sendTextMessage(numeroDestino, null, mensagemFinal, null, null)
+                val parts = smsManager.divideMessage(mensagemFinal)
+                smsManager.sendMultipartTextMessage(numeroDestino, null, parts, null, null)
                 Toast.makeText(context, "SMS de SOS enviado!", Toast.LENGTH_SHORT).show()
-                Log.d(TAG, "SMS enviado para $numeroDestino")
+                Log.d(TAG, "SMS multipart enviado para $numeroDestino")
             } catch (e: Exception) {
                 Toast.makeText(context, "Erro ao enviar SMS: ${e.message}", Toast.LENGTH_LONG).show()
                 Log.e(TAG, "Erro ao enviar SMS", e)
             }
         } else {
-            // Se não tiver permissão (embora já tenhamos pedido antes, é bom verificar de novo)
             Toast.makeText(context, "Permissão de SMS não concedida. Não é possível enviar.", Toast.LENGTH_LONG).show()
             Log.w(TAG, "Tentativa de enviar SMS sem permissão.")
-            // Poderia chamar checkAndRequestPermissions() aqui de novo, se quisesse
         }
     }
     // Função centralizada para acionar o SOS
     private fun triggerSosAction() {
         Log.d(TAG, "Ação SOS acionada! Iniciando processo...")
         Toast.makeText(this, "Acionando SOS...", Toast.LENGTH_SHORT).show()
-        // 1. Tenta obter a localização
-        obterLocalizacaoAtual { location ->
-            // 2. Envia o SMS com a localização obtida (ou null se falhou)
+        obterLocalizacaoAtualComTimeout { location ->
             enviarSmsComLocalizacao(this, location)
         }
     }
@@ -294,16 +349,9 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
     }
-
-
-
-
-
 }
 
 // ... (O restante do código da SOSScreen e Preview continua igual) ...
-
-
 
 @Composable
 fun SOSScreen(onSosButtonClick: () -> Unit, modifier: Modifier = Modifier) {
@@ -333,5 +381,3 @@ fun SOSScreenPreview() {
         SOSScreen(onSosButtonClick = {})
     }
 }
-
-

@@ -20,8 +20,7 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.location.*
 import com.google.android.gms.tasks.CancellationTokenSource
 import java.util.concurrent.atomic.AtomicBoolean // Para controle de trigger
-
-
+import kotlinx.coroutines.*
 
 class VolumeMonitoringService : Service() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
@@ -31,6 +30,7 @@ class VolumeMonitoringService : Service() {
     private val TAG = "VolumeSOS_Service"
     private val NOTIFICATION_CHANNEL_ID = "com.example.volumesosapp.channel" // ID único do canal
     private val NOTIFICATION_ID = 1 // ID único da notificação
+    private val locationTimeoutMs = 7000L // 7 segundos de timeout para localização
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -106,11 +106,6 @@ class VolumeMonitoringService : Service() {
         // --- Lógica para tratar a ação do botão SOS (ACTION_TRIGGER_SOS) virá aqui ---
         if (intent?.action == "ACTION_TRIGGER_SOS") {
             Log.d(TAG, "Ação ACTION_TRIGGER_SOS recebida no serviço!")
-            // Aqui chamaremos a função de enviar SMS no próximo passo
-            Toast.makeText(this, "SOS via notificação (ainda não implementado)...", Toast.LENGTH_SHORT).show()
-        }
-        if (intent?.action == "ACTION_TRIGGER_SOS") {
-            Log.d(TAG, "Ação ACTION_TRIGGER_SOS recebida no serviço!")
             triggerSosActionFromService() // Chama a função SOS do serviço
         }
         // --- Fim da lógica da ação ---
@@ -141,86 +136,110 @@ class VolumeMonitoringService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun obterLocalizacaoAtual(callback: (Location?) -> Unit) {
-        // Verifica permissões (usando 'this' como Context)
+    private fun obterLocalizacaoAtualComTimeout(callback: (Location?) -> Unit) {
         val hasFineLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val hasCoarseLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         if (!hasFineLocationPermission && !hasCoarseLocationPermission) {
             Log.w(TAG, "Permissão de localização não concedida ao tentar obter localização.")
-            // Não mostramos Toast do serviço, apenas logamos e retornamos null
             callback(null)
             return
         }
 
-        Log.d(TAG, "Serviço tentando obter localização atual...")
-        fusedLocationClient.getCurrentLocation(
-            Priority.PRIORITY_HIGH_ACCURACY,
-            cancellationTokenSource.token
-        ).addOnSuccessListener { location: Location? ->
-            if (location != null) {
-                Log.d(TAG, "Serviço obteve localização: Lat=${location.latitude}, Lon=${location.longitude}")
-                callback(location)
-            } else {
-                Log.w(TAG, "Serviço falhou ao obter localização (resultado nulo).")
+        var callbackCalled = AtomicBoolean(false)
+        val mainScope = CoroutineScope(Dispatchers.Main)
+
+        Log.d(TAG, "Serviço tentando obter localização atual (lastLocation)...")
+        fusedLocationClient.lastLocation
+            .addOnSuccessListener { location: Location? ->
+                if (!callbackCalled.getAndSet(true)) {
+                    if (location != null) {
+                        Log.d(TAG, "Serviço obteve localização: Lat=${location.latitude}, Lon=${location.longitude}")
+                        callback(location)
+                    } else {
+                        Log.w(TAG, "Serviço falhou ao obter localização (lastLocation nulo). Tentando getCurrentLocation...")
+                        fusedLocationClient.getCurrentLocation(
+                            Priority.PRIORITY_HIGH_ACCURACY,
+                            CancellationTokenSource().token
+                        ).addOnSuccessListener { loc: Location? ->
+                            if (!callbackCalled.getAndSet(true)) {
+                                if (loc != null) {
+                                    Log.d(TAG, "Serviço obteve localização via getCurrentLocation: Lat=${loc.latitude}, Lon=${loc.longitude}")
+                                    callback(loc)
+                                } else {
+                                    Log.w(TAG, "Serviço falhou ao obter localização (getCurrentLocation também nulo).")
+                                    callback(null)
+                                }
+                            }
+                        }.addOnFailureListener { exception ->
+                            if (!callbackCalled.getAndSet(true)) {
+                                Log.e(TAG, "Serviço: Erro ao obter localização (getCurrentLocation)", exception)
+                                callback(null)
+                            }
+                        }
+                    }
+                }
+            }
+            .addOnFailureListener { exception ->
+                if (!callbackCalled.getAndSet(true)) {
+                    Log.e(TAG, "Serviço: Erro ao obter localização (lastLocation)", exception)
+                    callback(null)
+                }
+            }
+
+        // Timeout manual para garantir que o callback sempre será chamado
+        mainScope.launch {
+            delay(locationTimeoutMs)
+            if (!callbackCalled.getAndSet(true)) {
+                Log.w(TAG, "Timeout ao tentar obter localização no serviço. Seguindo sem localização.")
                 callback(null)
             }
-        }.addOnFailureListener { exception ->
-            Log.e(TAG, "Serviço: Erro ao obter localização", exception)
-            callback(null)
         }
     }
 
     // Modificada para aceitar um callback de conclusão
     private fun enviarSmsComLocalizacao(context: Context, location: Location?, onComplete: (Boolean) -> Unit) {
         val numeroDestino = "11934173173" // !!! SUBSTITUA PELO NÚMERO REAL !!!
-        val mensagemBase = "SOS! Preciso de ajuda."
-        val mensagemFinal: String
-
-        if (location != null) {
+        val mensagemFinal = if (location != null) {
             val latitude = location.latitude
             val longitude = location.longitude
-            // Envia as coordenadas diretamente
-            mensagemFinal = "$mensagemBase Minha localização: Lat $latitude, Lon $longitude"
-            Log.d(TAG, "Preparando SMS com coordenadas: $mensagemFinal")
+            val googleMapsLink = "https://maps.google.com/?q=$latitude,$longitude"
+            "SOS! Preciso de ajuda.\nMinha localização:\n$googleMapsLink"
         } else {
-            mensagemFinal = "$mensagemBase (Localização não disponível )"
-            Log.d(TAG, "Preparando SMS sem coordenadas: $mensagemFinal")
+            "SOS! Preciso de ajuda.\nLocalização não disponível."
         }
 
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
             try {
-                Log.d(TAG, "---> TENTANDO ENVIAR SMS para $numeroDestino com mensagem: '$mensagemFinal'") // Log Adicional
                 val smsManager = context.getSystemService(SmsManager::class.java)
-                smsManager.sendTextMessage(numeroDestino, null, mensagemFinal, null, null)
-                Log.d(TAG, "---> SMS enviado (sem erro na chamada) para $numeroDestino") // Log Adicional
-                onComplete(true) // Sucesso (aparente)
+                val parts = smsManager.divideMessage(mensagemFinal)
+                smsManager.sendMultipartTextMessage(numeroDestino, null, parts, null, null)
+                Log.d(TAG, "---> SMS multipart enviado para $numeroDestino")
+                onComplete(true)
             } catch (e: Exception) {
-                Log.e(TAG, "---> ERRO ao tentar enviar SMS", e) // Log Adicional
-                onComplete(false) // Falha
+                Log.e(TAG, "---> ERRO ao tentar enviar SMS", e)
+                onComplete(false)
             }
         } else {
-            Log.w(TAG, "---> Tentativa de enviar SMS SEM PERMISSÃO.") // Log Adicional
-            onComplete(false) // Falha (sem permissão)
+            Log.w(TAG, "---> Tentativa de enviar SMS SEM PERMISSÃO.")
+            onComplete(false)
         }
     }
 
 
     // Função centralizada no serviço para acionar o SOS
     private fun triggerSosActionFromService() {
-        // Verifica se já não está enviando para evitar múltiplos cliques
         if (isSendingSms.compareAndSet(false, true)) {
             Log.d(TAG, "Serviço: Ação SOS acionada! Tentando obter localização...")
-            // Atualiza notificação para indicar que está enviando
             updateNotification("Enviando SOS...")
 
-            obterLocalizacaoAtual { location ->
+            obterLocalizacaoAtualComTimeout { location ->
+                Log.d(TAG, "Callback de localização recebido no serviço. Location: $location")
                 enviarSmsComLocalizacao(this, location) { success ->
-                    // Quando o envio terminar (sucesso ou falha):
-                    isSendingSms.set(false) // Libera o flag
-                    // Atualiza a notificação com o resultado
+                    isSendingSms.set(false)
                     updateNotification(if (success) "SOS enviado com sucesso!" else "Falha ao enviar SOS.")
-                    // Poderia agendar para voltar ao texto normal depois de um tempo
+                    Toast.makeText(this, if (success) "SMS de SOS enviado!" else "Falha ao enviar SMS de SOS.", Toast.LENGTH_LONG).show()
+                    Log.d(TAG, "Resultado do envio de SMS: $success")
                 }
             }
         } else {
